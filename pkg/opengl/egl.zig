@@ -10,9 +10,7 @@
 //! Call `load()` once before using any EGL extension functions.
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("glad/glad_egl.h");
-});
+const c = @import("c");
 
 const log = std.log.scoped(.opengl_egl);
 
