@@ -1,67 +1,18 @@
-//! EGL bindings via GLAD.
+//! Thin EGL bindings via GLAD.
 //!
-//! Core EGL functions (eglGetDisplay, eglCreateContext, etc.) are linked
-//! directly from libEGL and available via `c.egl*`. Extension functions
-//! (such as `eglExportDMABUFImageMESA`) are loaded by GLAD at runtime
-//! and are also accessed via `c.egl*` — GLAD `#define`s each extension
-//! function name to its internal function-pointer global, so the same
-//! call syntax works for both core and extension functions.
+//! Only types and functions used in Ghostty are modelled,
+//! although the API design is rather flexible and can be extended
+//! to add whatever is required. Drop down to `gl.egl.c` to access
+//! raw EGL functions.
 //!
 //! Call `load()` once before using any EGL extension functions.
 
 const std = @import("std");
-const c = @import("c");
+
+pub const c = @import("c");
+const glad = @import("glad.zig");
 
 const log = std.log.scoped(.opengl_egl);
-
-/// The maximum number of planes in a DMABUF that we support.
-pub const max_planes = 4;
-
-/// A dma-buf frame produced by exporting a GL texture via EGL. This is
-/// what the render thread hands to the apprt for compositing.
-pub const ExportedFrame = struct {
-    /// Width of the texture in pixels (device pixels).
-    width: u32,
-    /// Height of the texture in pixels (device pixels).
-    height: u32,
-    /// DRM fourcc of the pixel format. Ghostty renders RGBA/BGRA8
-    /// premultiplied.
-    fourcc: u32,
-    /// DRM modifier of the format.
-    modifier: u64,
-    /// Whether the data is premultiplied. Ghostty's GL renderers output
-    /// premultiplied alpha; GDK composites accordingly.
-    premultiplied: bool = true,
-    planes: Planes,
-
-    /// The dma-buf planes for a presented frame. The caller owns the fds
-    /// and must release them (or hand them to a compositor).
-    pub const Planes = struct {
-        /// Number of planes. Valid planes are `planes[0..count]`.
-        count: u8,
-
-        /// File descriptor for each plane. The consumer (compositor or
-        /// `GdkDmabufTexture`) takes ownership of these fds.
-        fds: [max_planes]std.posix.fd_t,
-
-        /// Offset into the dma-buf where each plane starts, in bytes.
-        offsets: [max_planes]c_int,
-
-        /// Strides of each plane, in bytes.
-        strides: [max_planes]c_int,
-
-        /// Close all valid fds.
-        pub fn deinit(self: Planes) void {
-            for (self.fds[0..self.count]) |fd| {
-                if (fd >= 0) _ = std.posix.system.close(fd);
-            }
-        }
-    };
-
-    pub fn deinit(self: ExportedFrame) void {
-        self.planes.deinit();
-    }
-};
 
 /// Load EGL extension function pointers via GLAD. Must be called before
 /// using any EGL extension functions (e.g. dmabuf export). Core EGL
@@ -77,217 +28,196 @@ pub fn getProcAddress(name: [*c]const u8) callconv(.c) ?*const fn () callconv(.c
     return c.eglGetProcAddress(name);
 }
 
-/// An owned EGL display and context.
-///
-/// EGL contexts can only be current on one thread at a time. The caller
-/// is responsible for calling `makeCurrent`/`releaseCurrent` on the
-/// appropriate thread.
-pub const Context = struct {
-    display: *anyopaque,
-    context: *anyopaque,
+pub const Error = error{
+    NotInitialized,
+    BadAccess,
+    BadAlloc,
+    BadAttribute,
+    BadContext,
+    BadConfig,
+    BadCurrentSurface,
+    BadDisplay,
+    BadSurface,
+    BadMatch,
+    BadParameter,
+    BadNativePixmap,
+    BadNativeWindow,
+    ContextLost,
+    Unknown,
+};
 
-    /// Create an EGL display and context and make the context current on
-    /// the calling thread so that GL function pointers can be loaded. After
-    /// this returns, the caller should release the context
-    /// (`releaseCurrent`) so it can be bound to the render thread.
-    ///
-    /// This assumes `EGL_KHR_surfaceless_context` is always available since
-    /// we want to render headlessly, not to a native window surface.
-    /// Despite being an optional extension it is implemented practically
-    /// universally by all graphics drivers that also support our minimum
-    /// OpenGL version of 4.3, so we shouldn't even need to query for support
-    /// here.
-    pub fn init(
-        gl_major: c.EGLint,
-        gl_minor: c.EGLint,
-    ) error{EglInitializeFailed}!Context {
-        // Get the default display.
-        const display = c.eglGetDisplay(c.EGL_DEFAULT_DISPLAY) orelse {
-            log.err("failed to get EGL display err=0x{x}", .{c.eglGetError()});
-            return error.EglInitializeFailed;
-        };
+pub fn getError() Error!void {
+    return switch (glad.context.GetError.?()) {
+        c.EGL_SUCCESS => {},
+        c.EGL_NOT_INITIALIZED => error.NotInitialized,
+        c.EGL_BAD_ACCESS => error.BadAccess,
+        c.EGL_BAD_ALLOC => error.BadAlloc,
+        c.EGL_BAD_ATTRIBUTE => error.BadAttribute,
+        c.EGL_BAD_CONTEXT => error.BadContext,
+        c.EGL_BAD_CONFIG => error.BadConfig,
+        c.EGL_BAD_CURRENT_SURFACE => error.BadCurrentSurface,
+        c.EGL_BAD_DISPLAY => error.BadDisplay,
+        c.EGL_BAD_SURFACE => error.BadSurface,
+        c.EGL_BAD_MATCH => error.BadMatch,
+        c.EGL_BAD_PARAMETER => error.BadParameter,
+        c.EGL_BAD_NATIVE_PIXMAP => error.BadNativePixmap,
+        c.EGL_BAD_NATIVE_WINDOW => error.BadNativeWindow,
+        c.EGL_CONTEXT_LOST => error.ContextLost,
+        else => Error.Unknown,
+    };
+}
+
+pub fn mustError() Error {
+    return if (getError()) |_| Error.Unknown else |e| e;
+}
+
+pub fn bindApi(api: c.EGLenum) Error!void {
+    if (c.eglBindAPI(api) != c.EGL_TRUE) {
+        return mustError();
+    }
+}
+
+pub const Display = opaque {
+    pub fn init(id: c.EGLNativeDisplayType) Error!*Display {
+        const display = c.eglGetDisplay(id) orelse return mustError();
 
         var major: c.EGLint = undefined;
         var minor: c.EGLint = undefined;
         if (c.eglInitialize(display, &major, &minor) != c.EGL_TRUE) {
-            log.err("failed to initialize EGL display err=0x{x}", .{c.eglGetError()});
-            return error.EglInitializeFailed;
+            return mustError();
         }
         log.debug("EGL initialized {}.{}", .{ major, minor });
-
-        // We want a desktop OpenGL context.
-        if (c.eglBindAPI(c.EGL_OPENGL_API) != c.EGL_TRUE) {
-            log.err("failed to bind OpenGL API to EGL err=0x{x}", .{c.eglGetError()});
-            return error.EglInitializeFailed;
-        }
-
-        // Choose a config. We need a config that is renderable with
-        // OpenGL and a RGBA8 color buffer. No surface type is
-        // needed since we use surfaceless context.
-        const config_attribs = [_]c.EGLint{
-            c.EGL_RENDERABLE_TYPE, c.EGL_OPENGL_BIT,
-            c.EGL_RED_SIZE,        8,
-            c.EGL_GREEN_SIZE,      8,
-            c.EGL_BLUE_SIZE,       8,
-            c.EGL_ALPHA_SIZE,      8,
-            c.EGL_NONE,
-        };
-        var config: c.EGLConfig = undefined;
-        var num_config: c.EGLint = 0;
-        if (c.eglChooseConfig(
-            display,
-            &config_attribs,
-            &config,
-            1,
-            &num_config,
-        ) != c.EGL_TRUE or num_config == 0) {
-            log.err("failed to choose EGL config err=0x{x}", .{c.eglGetError()});
-            return error.EglInitializeFailed;
-        }
-
-        // Create our context.
-        const context_attribs = [_]c.EGLint{
-            c.EGL_CONTEXT_MAJOR_VERSION,       gl_major,
-            c.EGL_CONTEXT_MINOR_VERSION,       gl_minor,
-            c.EGL_CONTEXT_OPENGL_PROFILE_MASK, c.EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-            c.EGL_NONE,
-        };
-        const context = c.eglCreateContext(display, config, null, &context_attribs) orelse {
-            log.err("failed to create EGL context err=0x{x}", .{c.eglGetError()});
-            return error.EglInitializeFailed;
-        };
-        errdefer _ = c.eglDestroyContext(display, context);
-
-        if (c.eglMakeCurrent(display, null, null, context) != c.EGL_TRUE) {
-            log.err("failed to make EGL context current err=0x{x}", .{c.eglGetError()});
-            return error.EglInitializeFailed;
-        }
-
-        var result: Context = .{
-            .display = display,
-            .context = context,
-        };
-
-        // Release the context from this thread so it can be bound
-        // elsewhere. EGL contexts can only be current on one thread.
-        result.releaseCurrent();
-        return result;
-    }
-
-    /// Tear down the EGL context. Safe to call from any thread.
-    /// The caller must ensure the context is not in use.
-    /// After this returns the `Context` is invalid and must not be reused.
-    pub fn deinit(self: *Context) void {
-        _ = c.eglMakeCurrent(self.display, null, null, null);
-        _ = c.eglDestroyContext(self.display, self.context);
-
-        // Note: we intentionally do NOT call `eglTerminate` here.
-        // All surfaces share `EGL_DEFAULT_DISPLAY`; terminating it when
-        // one surface closes would invalidate every other surface's context
-        // and every attempt to export will fail with `EGL_BAD_MATCH`.
-        // The display lives for the process lifetime and is cleaned up
-        // by the OS on exit.
+        return @ptrCast(display);
     }
 
     /// Make the EGL context current on the calling thread and (re)load
     /// the thread-local GLAD function pointers so subsequent GL work is
     /// valid. Returns an error if the context can't be made current.
-    pub fn makeCurrent(self: *const Context) !void {
-        if (c.eglMakeCurrent(self.display, null, null, self.context) != c.EGL_TRUE) {
-            log.err("failed to make EGL context current err=0x{x}", .{c.eglGetError()});
-            return error.EglMakeCurrentFailed;
+    pub fn makeCurrent(self: *Display, draw: ?*Surface, read: ?*Surface, context: ?*Context) Error!void {
+        if (c.eglMakeCurrent(self, draw, read, context) != c.EGL_TRUE) {
+            return mustError();
         }
     }
 
-    /// Release the context from the calling thread.
-    pub fn releaseCurrent(self: *const Context) void {
-        _ = c.eglMakeCurrent(self.display, null, null, null);
+    pub fn releaseCurrent(self: *Display) void {
+        _ = c.eglMakeCurrent(self, null, null, null);
+    }
+};
+
+pub const Config = opaque {
+    pub fn choose(display: *Display, attrs: [:c.EGL_NONE]const c.EGLint) Error!*Config {
+        var config: c.EGLConfig = undefined;
+        var num_config: c.EGLint = 0;
+        if (c.eglChooseConfig(
+            display,
+            attrs.ptr,
+            &config,
+            1,
+            &num_config,
+        ) != c.EGL_TRUE or num_config == 0) {
+            return mustError();
+        }
+        return @ptrCast(config);
+    }
+};
+
+pub const Surface = opaque {};
+
+pub const Context = opaque {
+    pub fn create(
+        display: *Display,
+        config: *Config,
+        surface: ?*Surface,
+        attrs: [:c.EGL_NONE]const c.EGLint,
+    ) Error!*Context {
+        const context = c.eglCreateContext(
+            display,
+            config,
+            surface,
+            attrs.ptr,
+        ) orelse return mustError();
+        return @ptrCast(context);
     }
 
-    /// Export a 2D OpenGL texture as an `ExportedFrame` (DMABUF) via
-    /// `EGL_MESA_image_dma_buf_export`.
-    ///
-    /// `texture_id` is the GL texture name. `width` and `height` are the
-    /// texture dimensions in pixels (included in the returned frame). The
-    /// caller owns the fds in the returned frame's planes and must release
-    /// them or hand them to a compositor.
-    pub fn exportDmabuf(
-        self: *const Context,
-        texture_id: u32,
-        width: u32,
-        height: u32,
-    ) !ExportedFrame {
-        // Create an EGL image from the texture.
+    pub fn destroy(self: *Context, display: *Display) Error!void {
+        if (c.eglDestroyContext(display, self) != c.EGL_TRUE) {
+            return mustError();
+        }
+    }
+};
+
+pub const Image = opaque {
+    pub fn create(
+        display: *Display,
+        context: *Context,
+        comptime target: ImageTarget,
+        buffer: target.Buffer(),
+        attrs: ?[:c.EGL_NONE]c.EGLAttrib,
+    ) Error!*Image {
         const image = c.eglCreateImage(
-            self.display,
-            self.context,
-            c.EGL_GL_TEXTURE_2D,
-            @ptrFromInt(@as(usize, texture_id)),
-            null,
-        ) orelse {
-            log.err("failed to create EGLImage from texture err=0x{x}", .{c.eglGetError()});
-            return error.EglImageFailed;
-        };
-        defer _ = c.eglDestroyImage(self.display, image);
+            display,
+            context,
+            @intFromEnum(target),
+            @ptrFromInt(@as(usize, buffer)),
+            if (attrs) |a| a.ptr else null,
+        ) orelse return mustError();
 
-        // Query the dma-buf metadata.
-        var fourcc: c_int = undefined;
-        var num_planes: c_int = undefined;
-        var modifier: u64 = undefined;
+        return @ptrCast(image);
+    }
+
+    pub fn destroy(self: *Image, display: *Display) Error!void {
+        if (c.eglDestroyImage(display, self) != c.EGL_TRUE) {
+            return mustError();
+        }
+    }
+
+    pub fn exportDmabufQuery(self: *Image, display: *Display) Error!DmabufQuery {
+        var query: DmabufQuery = undefined;
         if (c.eglExportDMABUFImageQueryMESA(
-            self.display,
-            image,
-            &fourcc,
-            &num_planes,
-            &modifier,
+            display,
+            self,
+            &query.fourcc,
+            &query.num_planes,
+            &query.modifier,
         ) != c.EGL_TRUE) {
-            log.err("eglExportDMABUFImageQueryMESA failed err=0x{x}", .{c.eglGetError()});
-            return error.DmabufQueryFailed;
+            return mustError();
         }
+        return query;
+    }
 
-        if (num_planes < 1 or num_planes > max_planes) {
-            log.err("dma-buf has unsupported plane count {}", .{num_planes});
-            return error.UnsupportedPlaneCount;
-        }
-
-        // Export the fd(s).
-        var fds: [max_planes]c_int = undefined;
-        var strides: [max_planes]c_int = undefined;
-        var offsets: [max_planes]c_int = undefined;
+    pub fn exportDmabuf(
+        self: *Image,
+        display: *Display,
+        fds: []c_int,
+        strides: []c_int,
+        offsets: []c_int,
+    ) Error!void {
         if (c.eglExportDMABUFImageMESA(
-            self.display,
-            image,
-            &fds,
-            &strides,
-            &offsets,
+            display,
+            self,
+            fds.ptr,
+            strides.ptr,
+            offsets.ptr,
         ) != c.EGL_TRUE) {
-            log.err("eglExportDMABUFImageMESA failed err=0x{x}", .{c.eglGetError()});
-            return error.DmabufExportFailed;
+            return mustError();
         }
+    }
+};
 
-        // If any fd came back invalid close the rest and bail; the caller
-        // expects fd ownership to be transferred only on success.
-        var n_valid: usize = 0;
-        while (n_valid < num_planes) : (n_valid += 1) {
-            if (fds[n_valid] < 0) {
-                for (fds[0..n_valid]) |bad| _ = std.posix.system.close(bad);
-                log.err("dma-buf export returned an invalid fd", .{});
-                return error.DmabufInvalidFd;
-            }
-        }
+pub const ImageTarget = enum(c.EGLenum) {
+    texture_2d = c.EGL_GL_TEXTURE_2D,
+    // Many other variants, add when needed
 
-        return .{
-            .width = width,
-            .height = height,
-            .fourcc = @intCast(fourcc),
-            .modifier = modifier,
-            .premultiplied = true,
-            .planes = .{
-                .count = @intCast(num_planes),
-                .fds = fds,
-                .offsets = offsets,
-                .strides = strides,
-            },
+    pub fn Buffer(self: ImageTarget) type {
+        return switch (self) {
+            // GL texture name
+            .texture_2d => u32,
         };
     }
+};
+
+pub const DmabufQuery = struct {
+    fourcc: c_int,
+    num_planes: c_int,
+    modifier: u64,
 };

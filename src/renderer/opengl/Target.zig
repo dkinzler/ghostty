@@ -22,6 +22,9 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const gl = @import("opengl");
+const egl = gl.egl;
+
+const Dmabuf = @import("../Dmabuf.zig");
 
 const log = std.log.scoped(.opengl);
 
@@ -55,23 +58,23 @@ pub fn init(opts: Options) !Self {
     const texture = try gl.Texture.create();
     errdefer texture.destroy();
     {
-        const bound_tex = try texture.bind(.@"2D");
+        const bound_tex = try texture.bind(.@"2d");
         defer bound_tex.unbind();
-        try bound_tex.parameter(.MinFilter, @intFromEnum(gl.Texture.MinFilter.nearest));
-        try bound_tex.parameter(.MagFilter, @intFromEnum(gl.Texture.MagFilter.nearest));
-        try bound_tex.parameter(.WrapS, @intFromEnum(gl.Texture.Wrap.clamp_to_edge));
-        try bound_tex.parameter(.WrapT, @intFromEnum(gl.Texture.Wrap.clamp_to_edge));
+        try bound_tex.parameter(.min_filter, .nearest);
+        try bound_tex.parameter(.mag_filter, .nearest);
+        try bound_tex.parameter(.wrap_s, .clamp_to_edge);
+        try bound_tex.parameter(.wrap_t, .clamp_to_edge);
         try bound_tex.image2D(
             0,
             .srgba,
             @intCast(opts.width),
             @intCast(opts.height),
             .rgba,
-            .UnsignedByte,
+            .unsigned_byte,
             null,
         );
-        try bound_tex.parameter(.BaseLevel, @as(gl.c.GLint, 0));
-        try bound_tex.parameter(.MaxLevel, @as(gl.c.GLint, 0));
+        try bound_tex.parameter(.base_level, 0);
+        try bound_tex.parameter(.max_level, 0);
     }
 
     const fbo = try gl.Framebuffer.create();
@@ -79,7 +82,7 @@ pub fn init(opts: Options) !Self {
     {
         const bound_fbo = try fbo.bind(.framebuffer);
         defer bound_fbo.unbind();
-        try bound_fbo.texture2D(.color0, .@"2D", texture, 0);
+        try bound_fbo.texture2D(.color0, .@"2d", texture, 0);
         switch (bound_fbo.checkStatus()) {
             .complete => {},
             else => |status| {
@@ -93,23 +96,23 @@ pub fn init(opts: Options) !Self {
     const export_texture = try gl.Texture.create();
     errdefer export_texture.destroy();
     {
-        const bound_tex = try export_texture.bind(.@"2D");
+        const bound_tex = try export_texture.bind(.@"2d");
         defer bound_tex.unbind();
-        try bound_tex.parameter(.MinFilter, @intFromEnum(gl.Texture.MinFilter.nearest));
-        try bound_tex.parameter(.MagFilter, @intFromEnum(gl.Texture.MagFilter.nearest));
-        try bound_tex.parameter(.WrapS, @intFromEnum(gl.Texture.Wrap.clamp_to_edge));
-        try bound_tex.parameter(.WrapT, @intFromEnum(gl.Texture.Wrap.clamp_to_edge));
+        try bound_tex.parameter(.min_filter, .nearest);
+        try bound_tex.parameter(.mag_filter, .nearest);
+        try bound_tex.parameter(.wrap_s, .clamp_to_edge);
+        try bound_tex.parameter(.wrap_t, .clamp_to_edge);
         try bound_tex.image2D(
             0,
             .rgba,
             @intCast(opts.width),
             @intCast(opts.height),
             .rgba,
-            .UnsignedByte,
+            .unsigned_byte,
             null,
         );
-        try bound_tex.parameter(.BaseLevel, @as(gl.c.GLint, 0));
-        try bound_tex.parameter(.MaxLevel, @as(gl.c.GLint, 0));
+        try bound_tex.parameter(.base_level, 0);
+        try bound_tex.parameter(.max_level, 0);
     }
 
     const export_fbo = try gl.Framebuffer.create();
@@ -117,7 +120,7 @@ pub fn init(opts: Options) !Self {
     {
         const bound_fbo = try export_fbo.bind(.framebuffer);
         defer bound_fbo.unbind();
-        try bound_fbo.texture2D(.color0, .@"2D", export_texture, 0);
+        try bound_fbo.texture2D(.color0, .@"2d", export_texture, 0);
         switch (bound_fbo.checkStatus()) {
             .complete => {},
             else => |status| {
@@ -137,54 +140,55 @@ pub fn init(opts: Options) !Self {
     };
 }
 
-/// Blit the rendered sRGB texture into the plain RGBA8 export texture.
-/// Call this before exporting `export_texture` as a dma-buf. The blit
-/// copies the already-sRGB-encoded pixel values verbatim (no color
-/// conversion) because the destination is a non-sRGB format.
-pub fn blitForExport(self: *const Self) !void {
-    // Disable GL_FRAMEBUFFER_SRGB during the blit. With it enabled, the
-    // blit would read from the sRGB source (converting to linear) and
-    // write to the non-sRGB destination (keeping linear), producing dark
-    // output. We want a verbatim copy of the already-sRGB-encoded bytes.
-    gl.glad.context.Disable.?(gl.c.GL_FRAMEBUFFER_SRGB);
-    defer gl.glad.context.Enable.?(gl.c.GL_FRAMEBUFFER_SRGB);
-
-    // Bind the render FBO as read, the export FBO as draw.
-    gl.glad.context.BindFramebuffer.?(
-        gl.c.GL_READ_FRAMEBUFFER,
-        self.framebuffer.id,
-    );
-    defer gl.glad.context.BindFramebuffer.?(
-        gl.c.GL_READ_FRAMEBUFFER,
-        0,
-    );
-
-    gl.glad.context.BindFramebuffer.?(
-        gl.c.GL_DRAW_FRAMEBUFFER,
-        self.export_framebuffer.id,
-    );
-    defer gl.glad.context.BindFramebuffer.?(
-        gl.c.GL_DRAW_FRAMEBUFFER,
-        0,
-    );
-
-    gl.glad.context.BlitFramebuffer.?(
-        0,
-        0,
-        @intCast(self.width),
-        @intCast(self.height),
-        0,
-        0,
-        @intCast(self.width),
-        @intCast(self.height),
-        gl.c.GL_COLOR_BUFFER_BIT,
-        gl.c.GL_NEAREST,
-    );
-}
-
 pub fn deinit(self: *Self) void {
     self.export_framebuffer.destroy();
     self.export_texture.destroy();
     self.framebuffer.destroy();
     self.texture.destroy();
+}
+
+pub fn exportDmabuf(self: *const Self, display: *egl.Display, context: *egl.Context) !Dmabuf {
+    // We unfortunately cannot reuse the image here
+    // as it causes horrendous artifacts.
+    const image: *egl.Image = try .create(
+        display,
+        context,
+        .texture_2d,
+        self.export_texture.id,
+        null,
+    );
+    defer image.destroy(display) catch |err| {
+        log.err("failed to destroy image while exporting DMABUF err={}", .{err});
+    };
+
+    const query = try image.exportDmabufQuery(display);
+
+    if (query.num_planes < 1 or query.num_planes > Dmabuf.max_planes) {
+        log.err("DMABUF has too many planes={}", .{query.num_planes});
+        return error.BadMatch;
+    }
+
+    var planes: Dmabuf.Planes = .{ .count = @intCast(query.num_planes) };
+    try image.exportDmabuf(
+        display,
+        &planes.fds,
+        &planes.strides,
+        &planes.offsets,
+    );
+
+    planes.validate() catch {
+        log.err("DMABUF export returned an invalid fd", .{});
+        return error.BadMatch;
+    };
+
+    return .{
+        .width = @intCast(self.width),
+        .height = @intCast(self.height),
+        // bitCast instead of intCast since the numerical value of fourccs
+        // is rather meaningless, and we only care about the bit pattern
+        .fourcc = @bitCast(query.fourcc),
+        .modifier = query.modifier,
+        .premultiplied = true,
+        .planes = planes,
+    };
 }
