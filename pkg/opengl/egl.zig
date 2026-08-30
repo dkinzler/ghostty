@@ -79,7 +79,63 @@ pub fn bindApi(api: c.EGLenum) Error!void {
 
 pub const Display = opaque {
     pub fn init(id: c.EGLNativeDisplayType) Error!*Display {
-        const display = c.eglGetDisplay(id) orelse return mustError();
+        // This will use MESA, if I try to force the Nvidia driver
+        // with the __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+        // env var, eglGetDisplay returns null.
+        //
+        // const display = c.eglGetDisplay(id) orelse return mustError();
+
+        // This also works to setup a display by selecting a device
+        // directly. Just hard-coded here to use the first device which
+        // will be the Nvidia card on my system.
+        //
+        // var eglQueryDevicesEXT: *const fn (c.EGLint, [*c]c.EGLDeviceEXT, [*c]c.EGLint) callconv(.c) c.EGLBoolean = undefined;
+        // if (getProcAddress("eglQueryDevicesEXT")) |f| {
+        //     eglQueryDevicesEXT = @ptrCast(f);
+        //     log.debug("EGL eglQueryDevicesEXT found", .{});
+        // } else {
+        //     return mustError();
+        // }
+        // var num_devices: c.EGLint = undefined;
+        // var devices: c.EGLDeviceEXT = undefined;
+        // if (eglQueryDevicesEXT(1, &devices, &num_devices) != c.EGL_TRUE) {
+        //     return mustError();
+        // }
+
+        // var eglGetPlatformDisplayEXT: *const fn (platform: c.EGLenum, native_display: ?*anyopaque, attrib_list: [*c]const c.EGLAttrib) callconv(.c) c.EGLDisplay = undefined;
+        // if (getProcAddress("eglGetPlatformDisplayEXT")) |f| {
+        //     eglGetPlatformDisplayEXT = @ptrCast(f);
+        // } else {
+        //     return mustError();
+        // }
+
+        // This works as well to init a display.
+        //
+        // const EGL_PLATFORM_DEVICE_EXT: c_int = 0x313f;
+        // const display = eglGetPlatformDisplayEXT(
+        //     EGL_PLATFORM_DEVICE_EXT,
+        //     devices,
+        //     null,
+        // ) orelse return mustError();
+
+        const EGL_PLATFORM_SURFACELESS_MESA = 0x31dd;
+
+        // Both eglGetPlatformDisplayEXT and eglGetPlatformDisplay
+        // seem to work, not sure if this matters. For reference
+        // GTK uses eglGetPlatformDisplayEXT on my system but that
+        // is with EGL_PLATFORM_WAYLAND_EXT.
+        //
+        // const display = eglGetPlatformDisplayEXT(
+        //     EGL_PLATFORM_SURFACELESS_MESA,
+        //     id,
+        //     null,
+        // ) orelse return mustError();
+
+        const display = c.eglGetPlatformDisplay(
+            EGL_PLATFORM_SURFACELESS_MESA,
+            id,
+            null,
+        ) orelse return mustError();
 
         var major: c.EGLint = undefined;
         var minor: c.EGLint = undefined;
@@ -87,6 +143,14 @@ pub const Display = opaque {
             return mustError();
         }
         log.debug("EGL initialized {}.{}", .{ major, minor });
+
+        // Check which vendor was selected.
+        const vendor = c.eglQueryString(display, c.EGL_VENDOR);
+        const version = c.eglQueryString(display, c.EGL_VERSION);
+        const client_apis = c.eglQueryString(display, c.EGL_CLIENT_APIS);
+        const extensions = c.eglQueryString(display, c.EGL_EXTENSIONS);
+        log.debug("EGL vendor={s} version={s} client_apis={s} extensions={s}", .{ vendor, version, client_apis, extensions });
+
         return @ptrCast(display);
     }
 
@@ -117,6 +181,7 @@ pub const Config = opaque {
         ) != c.EGL_TRUE or num_config == 0) {
             return mustError();
         }
+        log.debug("EGL eglChooseConfig num_config={}", .{num_config});
         return @ptrCast(config);
     }
 };

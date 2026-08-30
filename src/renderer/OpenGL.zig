@@ -71,6 +71,11 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !OpenGL {
     // support here.
     const config: *egl.Config = try .choose(display, &.{
         egl.c.EGL_RENDERABLE_TYPE, egl.c.EGL_OPENGL_BIT,
+        // eglChooseConfig can't find a matching config without this.
+        // Likely because if a value is not specified, the default EGL_WINDOW_BIT
+        // is assumed, but that is not present in any configurations
+        // for the Surfaceless or Device platforms  on my system (checked with eglinfo).
+        egl.c.EGL_SURFACE_TYPE,    egl.c.EGL_PBUFFER_BIT,
         egl.c.EGL_RED_SIZE,        8,
         egl.c.EGL_GREEN_SIZE,      8,
         egl.c.EGL_BLUE_SIZE,       8,
