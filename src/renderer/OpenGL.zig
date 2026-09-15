@@ -59,6 +59,7 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !OpenGL {
     // Choose a config. We need a config that is renderable with
     // OpenGL and a RGBA8 color buffer.
     const config = egl.Config.choose(display, &.{
+        egl.c.EGL_SURFACE_TYPE,    0,
         egl.c.EGL_RENDERABLE_TYPE, egl.c.EGL_OPENGL_BIT,
         egl.c.EGL_RED_SIZE,        8,
         egl.c.EGL_GREEN_SIZE,      8,
