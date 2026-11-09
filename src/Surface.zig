@@ -3650,6 +3650,16 @@ pub fn scrollCallback(
         const delta: isize = @intFromFloat(@trunc(amount));
         assert(@abs(delta) >= 1);
 
+        log.debug("mouse scroll: scrollCallback yoff={} precision={} cell_size={} yoff_adjusted={} poff={} amount={} delta={}", .{
+            yoff,
+            scroll_mods.precision,
+            cell_size,
+            yoff_adjusted,
+            poff,
+            amount,
+            delta,
+        });
+
         break :y .{ .delta = delta };
     };
 

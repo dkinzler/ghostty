@@ -3123,6 +3123,7 @@ pub const Surface = extern struct {
         _: *gtk.EventControllerScroll,
         self: *Self,
     ) callconv(.c) void {
+        log.debug("mouse scroll: begin precision scroll", .{});
         self.private().precision_scroll = true;
     }
 
@@ -3130,6 +3131,7 @@ pub const Surface = extern struct {
         _: *gtk.EventControllerScroll,
         self: *Self,
     ) callconv(.c) void {
+        log.debug("mouse scroll: end precision scroll", .{});
         self.private().precision_scroll = false;
     }
 
@@ -3148,6 +3150,12 @@ pub const Surface = extern struct {
         const scroll_mods: input.ScrollMods = .{
             .precision = priv.precision_scroll,
         };
+
+        log.debug("mouse scroll: scroll y={} precision={} multiplier={}", .{
+            y,
+            priv.precision_scroll,
+            multiplier,
+        });
 
         const scaled = self.scaledCoordinates(x, y);
         surface.scrollCallback(
